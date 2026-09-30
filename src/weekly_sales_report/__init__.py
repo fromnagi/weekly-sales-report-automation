@@ -1,0 +1,1 @@
+"""Weekly retail sales consolidation."""

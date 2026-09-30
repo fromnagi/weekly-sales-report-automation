@@ -1,0 +1,36 @@
+WEEKLY SALES REPORT - INPUT REQUIREMENTS
+
+Before each weekly run, keep only files for the intended reporting period in
+input. Move or copy previous weeks' files out yourself. The program does not
+archive or remove them. Put files directly in input, not in subfolders.
+
+Accepted files: .csv and .xlsx only. Excel temporary files (~$...) are ignored.
+For XLSX, only the first worksheet is read. CSV may be UTF-8, UTF-8 with BOM,
+or CP949. Other spreadsheet types and unsupported CSV encodings appear as
+rejected files in the report.
+
+The first row must contain these exact headers (case and surrounding spaces
+do not matter):
+
+sale_date, branch_code, order_id, line_no, product_code, category,
+quantity, unit_price, status
+
+sale_date: YYYY-MM-DD, or a real Excel date cell.
+branch_code, order_id, product_code: non-empty text, or a nonnegative whole
+number in an Excel numeric cell with at most 15 digits. Numeric IDs become
+plain decimal text. If leading zeros matter, store the Excel source column
+as text before export; zeros already lost by Excel cannot be recovered.
+line_no and quantity: positive whole numbers.
+unit_price: zero or a positive number.
+category: non-empty text.
+status: COMPLETED (case and extra spaces are ignored). Other statuses do not
+enter this demo's sales total.
+
+This fictional client's order_id is assumed unique across all branches.
+An order line is identified by (order_id, line_no). The first valid occurrence
+is kept. Later copies appear in Exceptions. Conflicting re-exports require
+a client-specific correction rule; this program does not choose a revision.
+
+Original input files are never modified. Each successful run recreates
+output\weekly_sales_report.xlsx. Check Exceptions and Run_Info for rejected
+rows and files, including a report with no accepted sales rows.

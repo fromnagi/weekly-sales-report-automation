@@ -1,0 +1,12 @@
+WEEKLY SALES REPORT
+
+Keep this whole folder together when copying or unzipping it. No Python, terminal, or administrator access is needed to run the report.
+
+1. Read INPUT_REQUIREMENTS.txt, then put this week's sales CSV or XLSX files directly in the input folder.
+2. Double-click Weekly Sales Report.exe.
+3. Wait for the completion message. It shows accepted rows, rows needing review, and rejected files.
+4. Find the report at output\weekly_sales_report.xlsx. It may open automatically.
+5. Check Exceptions and Run_Info for rows or files needing attention. A report with zero accepted rows needs review.
+
+The original input files are not modified. Close an already-open output report in Excel before running again. If an error occurs, check output\last_run.log. The examples folder contains fictional demo files; copy them to input only when you want a demo run.
+After a failed run, an earlier report may still be in output; use the completion message and last_run.log to check whether a new report was created.
