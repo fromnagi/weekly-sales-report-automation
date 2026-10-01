@@ -3,10 +3,12 @@ import hashlib
 import shutil
 import zipfile
 from pathlib import Path
+from xml.etree import ElementTree as ET
 
 import pytest
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import PatternFill
+from openpyxl.worksheet.formula import ArrayFormula, DataTableFormula
 
 from weekly_sales_report.report import _identifier, build_report
 
@@ -344,7 +346,7 @@ def test_cp949_korean_and_formula_like_text_round_trip_as_literal(tmp_path):
         workbook.close()
 
 
-def test_unsupported_csv_encoding_is_file_failure(tmp_path):
+def test_csv_bytes_undecodable_by_both_attempted_encodings_are_file_failure(tmp_path):
     (tmp_path / "bad.csv").write_bytes(b"\xff\xff\xff")
     write_csv(tmp_path / "good.csv", HEADERS, [["2026-09-21", "B1", "O1", 1, "P1", "Food", 1, 2, "COMPLETED"]])
     output = tmp_path / "out" / "report.xlsx"
@@ -372,3 +374,169 @@ def test_conflicting_duplicate_names_changed_fields_without_changing_first(tmp_p
         assert "branch_code" in detail and "quantity" in detail and "sales.csv:2" in detail
     finally:
         workbook.close()
+
+
+@pytest.mark.parametrize("excel_fixture", [False, True], ids=["openpyxl", "excel-saved-xml"])
+def test_sparse_xlsx_trailing_status_is_row_exception_and_other_data_survives(tmp_path, excel_fixture):
+    input_dir = tmp_path / "input"
+    input_dir.mkdir()
+    source = input_dir / "01_sparse.xlsx"
+    if excel_fixture:
+        fixture = Path(__file__).parent / "fixtures" / "excel_styled_residue.xlsx"
+        with zipfile.ZipFile(fixture) as original, zipfile.ZipFile(source, "w") as sparse:
+            for name in original.namelist():
+                payload = original.read(name)
+                if name == "xl/worksheets/sheet1.xml":
+                    cell = b'<c r="I2" t="s"><v>13</v></c>'
+                    assert cell in payload
+                    payload = payload.replace(cell, b"")
+                sparse.writestr(name, payload)
+    else:
+        write_xlsx(source, HEADERS, [
+            ["2026-09-21", "B1", "O1", 1, "P1", "Food", 1, 2],
+            ["2026-09-21", "B1", "O2", 1, "P1", "Food", 1, 3, "COMPLETED"],
+        ])
+    write_csv(input_dir / "02_good.csv", HEADERS, [
+        ["2026-09-21", "B2", "O3", 1, "P1", "Food", 2, 4, "COMPLETED"],
+    ])
+    before = {path.name: hash_file(path) for path in input_dir.iterdir()}
+    output = tmp_path / "report.xlsx"
+    metrics = build_report(input_dir, output)
+    assert metrics["total_source_row_count"] == (2 if excel_fixture else 3)
+    assert metrics["clean_row_count"] == (1 if excel_fixture else 2)
+    assert metrics["row_exception_count"] == 1
+    assert metrics["rejected_file_count"] == 0
+    assert metrics["total_sales_amount"] == (8 if excel_fixture else 11)
+    assert metrics["total_source_row_count"] == (
+        metrics["clean_row_count"] + metrics["row_exception_count"]
+        + metrics["rejected_file_source_row_count"]
+    )
+    assert {path.name: hash_file(path) for path in input_dir.iterdir()} == before
+    workbook = load_workbook(output, read_only=True, data_only=True)
+    try:
+        exception, = rows(workbook["Exceptions"])
+        assert exception["error_codes"] == "MISSING_STATUS"
+        assert (exception["source_file"], exception["source_row"], exception["failure_scope"]) == (
+            "01_sparse.xlsx", 2, "ROW",
+        )
+        assert exception["original_status"] is None
+        assert exception["original_quantity"] == 1
+        assert rows(workbook["Run_Info"])[0]["exception_contribution"] == 1
+    finally:
+        workbook.close()
+
+
+@pytest.mark.parametrize("field", HEADERS + ["extra_note", "all"])
+@pytest.mark.parametrize("cached", [False, True], ids=["no-cache", "stale-cache"])
+def test_xlsx_formula_rows_are_visible_rejections_regardless_of_cache(tmp_path, field, cached):
+    input_dir = tmp_path / "input"
+    input_dir.mkdir()
+    headers = HEADERS + ["extra_note"]
+    values = ["2026-09-21", "B1", "O1", 1, "P1", "Food", 1, 2, "COMPLETED", "note"]
+    affected = list(range(len(headers))) if field == "all" else [headers.index(field)]
+    formula_row = values.copy()
+    for index in affected:
+        formula_row[index] = "=1+1"
+    source = input_dir / "01_formula.xlsx"
+    write_xlsx(source, headers, [formula_row, values])
+    if cached:
+        original = tmp_path / "original.xlsx"
+        source.rename(original)
+        ns = {"s": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+        with zipfile.ZipFile(original) as archive, zipfile.ZipFile(source, "w") as stale:
+            for name in archive.namelist():
+                payload = archive.read(name)
+                if name == "xl/worksheets/sheet1.xml":
+                    xml = ET.fromstring(payload)
+                    for cell in xml.findall(".//s:c", ns):
+                        if cell.find("s:f", ns) is not None:
+                            assert cell.find("s:f", ns).text == "1+1"
+                            cell.find("s:v", ns).text = "999"
+                    payload = ET.tostring(xml)
+                stale.writestr(name, payload)
+        probe = load_workbook(source, read_only=True, data_only=True)
+        try:
+            assert probe.active.cell(2, affected[0] + 1).value == 999
+        finally:
+            probe.close()
+    write_csv(input_dir / "02_good.csv", HEADERS, [
+        ["2026-09-21", "B2", "O2", 1, "P1", "Food", 2, 3, "COMPLETED"],
+        ["2026-09-21", "B1", "O1", 1, "P1", "Food", 1, 2, "COMPLETED"],
+    ])
+    before = {path.name: hash_file(path) for path in input_dir.iterdir()}
+    output = tmp_path / "report.xlsx"
+    metrics = build_report(input_dir, output)
+    assert metrics["total_source_row_count"] == 4
+    assert metrics["clean_row_count"] == 2
+    assert metrics["row_exception_count"] == 2
+    assert metrics["duplicate_row_count"] == 1
+    assert metrics["rejected_file_count"] == 0
+    assert metrics["rejected_file_source_row_count"] == 0
+    assert metrics["total_sales_amount"] == 8
+    assert {path.name: hash_file(path) for path in input_dir.iterdir()} == before
+    workbook = load_workbook(output, data_only=False)
+    try:
+        rejected, duplicate = rows(workbook["Exceptions"])
+        assert rejected["error_codes"] == "UNSUPPORTED_FORMULA"
+        assert (rejected["source_file"], rejected["source_row"], rejected["failure_scope"]) == (
+            "01_formula.xlsx", 2, "ROW",
+        )
+        for index in affected:
+            name = headers[index]
+            assert name in rejected["error_detail"]
+            assert rejected["original_" + name] == "=1+1"
+            column = list(workbook["Exceptions"].values)[0].index("original_" + name) + 1
+            assert workbook["Exceptions"].cell(2, column).data_type == "s"
+        assert duplicate["error_codes"] == "DUPLICATE_TRANSACTION"
+        assert [row["source_file"] for row in rows(workbook["Clean_Data"])] == [
+            "01_formula.xlsx", "02_good.csv",
+        ]
+        assert rows(workbook["Run_Info"])[0]["exception_contribution"] == 1
+    finally:
+        workbook.close()
+
+
+@pytest.mark.parametrize("formula", [
+    ArrayFormula(ref="H2", text="=1+1"), DataTableFormula(ref="H2", r1="H1"),
+], ids=["array", "data-table"])
+def test_structured_xlsx_formulas_are_inspectable_exceptions(tmp_path, formula):
+    source = tmp_path / "sales.xlsx"
+    write_xlsx(source, HEADERS, [
+        ["2026-09-21", "B1", "O1", 1, "P1", "Food", 1, formula, "COMPLETED"],
+    ])
+    before = hash_file(source)
+    output = tmp_path / "out" / "report.xlsx"
+    metrics = build_report(tmp_path, output)
+    assert (metrics["total_source_row_count"], metrics["clean_row_count"], metrics["row_exception_count"]) == (1, 0, 1)
+    assert hash_file(source) == before
+    workbook = load_workbook(output)
+    try:
+        exception, = rows(workbook["Exceptions"])
+        assert exception["error_codes"] == "UNSUPPORTED_FORMULA"
+        assert "unit_price" in exception["error_detail"]
+        if isinstance(formula, ArrayFormula):
+            assert exception["original_unit_price"] == "=1+1"
+        else:
+            assert "DataTableFormula" in exception["original_unit_price"]
+            assert "H2" in exception["original_unit_price"]
+    finally:
+        workbook.close()
+
+
+def test_xlsx_formula_like_literal_text_is_accepted_as_text(tmp_path):
+    source = tmp_path / "sales.xlsx"
+    workbook = Workbook()
+    workbook.active.append(HEADERS)
+    workbook.active.append(["2026-09-21", "=1+1", "O1", 1, "P1", "Food", 1, 2, "COMPLETED"])
+    workbook.active["B2"].data_type = "s"
+    workbook.save(source)
+    workbook.close()
+    output = tmp_path / "out" / "report.xlsx"
+    assert build_report(tmp_path, output)["clean_row_count"] == 1
+    result = load_workbook(output)
+    try:
+        assert result["Clean_Data"]["B2"].value == "=1+1"
+        assert result["Clean_Data"]["B2"].data_type == "s"
+        assert result["Summary"]["B30"].data_type == "s"
+    finally:
+        result.close()

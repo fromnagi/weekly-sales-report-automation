@@ -5,9 +5,16 @@ input. Move or copy previous weeks' files out yourself. The program does not
 archive or remove them. Put files directly in input, not in subfolders.
 
 Accepted files: .csv and .xlsx only. Excel temporary files (~$...) are ignored.
-For XLSX, only the first worksheet is read. CSV may be UTF-8, UTF-8 with BOM,
-or CP949. Other spreadsheet types and unsupported CSV encodings appear as
-rejected files in the report.
+For XLSX, only the first worksheet is read. Rows containing formulas in any
+data column are rejected as UNSUPPORTED_FORMULA, even if cached results exist.
+Export calculated values first; the program does not calculate Excel formulas
+or check whether cached results are current. Formula text remains inspectable
+in Exceptions. Text cells that only look like formulas remain literal text.
+
+CSV decoding tries UTF-8 (with or without BOM), then CP949 on a decode failure.
+This is not automatic encoding detection. Bytes invalid in both are rejected;
+some other encodings can decode as garbled text and still pass validation.
+Prefer a UTF-8 export and check the text. Other spreadsheet types are rejected.
 
 The first row must contain these exact headers (case and surrounding spaces
 do not matter):

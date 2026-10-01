@@ -1,6 +1,6 @@
 WEEKLY SALES REPORT
 
-Keep this whole folder together when copying or unzipping it. No Python, terminal, or administrator access is needed to run the report.
+This guide is for a built Windows package. Keep this whole folder together when copying or unzipping it. For running the repository source with Python, see README.md. Test a built package in the intended Windows environment before delivery.
 
 1. Read INPUT_REQUIREMENTS.txt, then put this week's sales CSV or XLSX files directly in the input folder.
 2. Double-click Weekly Sales Report.exe.

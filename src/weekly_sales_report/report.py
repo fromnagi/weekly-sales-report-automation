@@ -71,7 +71,7 @@ def _csv_records(path: Path) -> list[list[str]]:
     raise UnicodeError("CSV encoding is unsupported; save as UTF-8 (with or without BOM) or CP949")
 
 
-def _read_file(path: Path) -> tuple[list[tuple[int, dict]], int]:
+def _read_file(path: Path) -> tuple[list[tuple[int, dict, tuple[str, ...]]], int]:
     if path.suffix.lower() == ".csv":
         records = _csv_records(path)
         if not records:
@@ -87,31 +87,43 @@ def _read_file(path: Path) -> tuple[list[tuple[int, dict]], int]:
                 continue
             if len(values) < len(names) or not _blank(values[len(names):]):
                 raise SchemaError(f"Row {row_number} has {len(values)} cells; expected {len(names)}", source_rows)
-            rows.append((row_number, dict(zip(names, values[:len(names)]))))
+            rows.append((row_number, dict(zip(names, values[:len(names)])), ()))
         return rows, source_rows
 
-    workbook = load_workbook(path, read_only=True, data_only=True)
+    # Inspect formulas themselves: cached results can be missing or stale.
+    workbook = load_workbook(path, read_only=True, data_only=False)
     try:
         sheet = workbook.worksheets[0]
         # Read-only iteration otherwise trusts potentially stale <dimension> metadata.
         sheet.reset_dimensions()
-        iterator = sheet.iter_rows(values_only=True)
+        iterator = sheet.iter_rows()
         header = next(iterator, None)
         if header is None:
             raise SchemaError("Empty file", 0)
         values = list(iterator)
-        source_rows = sum(not _blank(cells) for cells in values)
+        source_rows = sum(not _blank(cell.value for cell in cells) for cells in values)
         try:
-            names = _headers(header)
+            names = _headers(tuple(cell.value for cell in header))
         except SchemaError as exc:
             raise SchemaError(str(exc), source_rows) from exc
         rows = []
         for row_number, cells in enumerate(values, start=2):
-            if _blank(cells):
+            cell_values = tuple(cell.value for cell in cells)
+            if _blank(cell_values):
                 continue
-            if len(cells) > len(names) and any(value is not None for value in cells[len(names):]):
+            if len(cells) > len(names) and any(value is not None for value in cell_values[len(names):]):
                 raise SchemaError(f"Row {row_number} has data beyond the header columns", source_rows)
-            rows.append((row_number, dict(zip(names, cells))))
+            # Sparse XLSX rows may end before the header width. Keep missing
+            # values explicit so the normal row validator can report them.
+            raw = {name: cell_values[index] if index < len(cell_values) else None
+                   for index, name in enumerate(names)}
+            formula_columns = tuple(name for name, cell in zip(names, cells) if cell.data_type == "f")
+            for name in formula_columns:
+                value = raw[name]
+                if not isinstance(value, str):
+                    # Array/data-table formulas have structured values in openpyxl.
+                    raw[name] = getattr(value, "text", None) or f"{type(value).__name__}: {vars(value)}"
+            rows.append((row_number, raw, formula_columns))
         return rows, source_rows
     finally:
         workbook.close()
@@ -298,11 +310,11 @@ def build_report(input_dir: Path, output_path: Path) -> dict:
                                "error_codes": "FILE_READ_ERROR", "error_detail": message})
             runs.append(run)
             continue
-        for source_row, raw in rows:
+        for source_row, raw, formula_columns in rows:
             for name in raw:
                 if name not in original_columns:
                     original_columns.append(name)
-            normalized, errors = _validate(raw)
+            normalized, errors = ({}, ["UNSUPPORTED_FORMULA"]) if formula_columns else _validate(raw)
             if not errors:
                 key = (normalized["order_id"], normalized["line_no"])
                 if key in seen:
@@ -311,7 +323,10 @@ def build_report(input_dir: Path, output_path: Path) -> dict:
                     seen[key] = normalized.copy(), path.name, source_row
             if errors:
                 detail = "Row failed validation"
-                if errors == ["DUPLICATE_TRANSACTION"]:
+                if formula_columns:
+                    detail = ("XLSX formulas are not supported; export values before processing. Formula columns: "
+                              + ", ".join(formula_columns))
+                elif errors == ["DUPLICATE_TRANSACTION"]:
                     first, first_file, first_row = seen[key]
                     different = [name for name in REQUIRED if normalized[name] != first[name]]
                     detail = (f"Conflicts with first accepted row {first_file}:{first_row}; different fields: "
